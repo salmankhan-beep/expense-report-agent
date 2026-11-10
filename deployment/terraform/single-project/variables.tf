@@ -67,3 +67,15 @@ variable "agent_identity_roles" {
     "roles/cloudtrace.agent",
   ]
 }
+
+variable "alert_notification_email" {
+  description = "Email that receives expense-review alerts. Leave empty to create the alert policy without a notification channel."
+  type        = string
+  default     = ""
+}
+
+variable "review_alert_threshold" {
+  description = "Alert when more than this many expense-review alerts fire within 10 minutes."
+  type        = number
+  default     = 5
+}

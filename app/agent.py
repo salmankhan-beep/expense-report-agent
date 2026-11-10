@@ -25,6 +25,7 @@ from google.adk.models import Gemini
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from app import observability as obs
 from app.config import config
 from app.expense_policy import EXPENSE_POLICY, normalize_category
 from app.tools import (
@@ -188,19 +189,55 @@ async def route_by_amount(node_input: dict[str, Any], ctx: Context) -> Event:
     amount = float(node_input.get("amount", 0) or 0)
     category = normalize_category(str(node_input.get("category", "")))
     limit = EXPENSE_POLICY[category]["per_claim_limit_usd"]
+    submitter = str(node_input.get("submitter", ""))
 
-    reasons: list[str] = []
-    if amount >= config.review_threshold:
-        reasons.append(f"amount ${amount:.2f} is at or above the review threshold")
-    if amount > limit:
-        reasons.append(
-            f"amount ${amount:.2f} exceeds the {category} policy limit of ${limit:.2f}"
+    with obs.span(
+        "expense.route",
+        submitter_id=obs.submitter_id(submitter),
+        amount_usd=amount,
+        category=category,
+        policy_limit_usd=limit,
+    ) as route_span:
+        reasons: list[str] = []
+        reason_codes: list[str] = []
+        if amount >= config.review_threshold:
+            reasons.append(f"amount ${amount:.2f} is at or above the review threshold")
+            reason_codes.append("threshold")
+        if amount > limit:
+            reasons.append(
+                f"amount ${amount:.2f} exceeds the {category} policy limit of ${limit:.2f}"
+            )
+            reason_codes.append("policy_limit")
+        history = await recall_records(ctx, submitter)
+        is_duplicate = bool(
+            find_duplicates(history, amount, str(node_input.get("date", "")))
         )
-    history = await recall_records(ctx, str(node_input.get("submitter", "")))
-    if find_duplicates(history, amount, str(node_input.get("date", ""))):
-        reasons.append("same amount already claimed by this submitter on this date")
+        if is_duplicate:
+            reasons.append("same amount already claimed by this submitter on this date")
+            reason_codes.append("duplicate")
 
-    route = "NEEDS_REVIEW" if reasons else "AUTO_APPROVE"
+        route = "NEEDS_REVIEW" if reasons else "AUTO_APPROVE"
+        obs.set_attributes(
+            route_span,
+            route=route,
+            reasons=",".join(reason_codes) or "none",
+            history_records=len(history),
+            duplicate=is_duplicate,
+        )
+        obs.routing_counter.add(
+            1, {"route": route, "reason": ",".join(reason_codes) or "none"}
+        )
+        obs.amount_histogram.record(amount, {"route": route})
+        obs.log_event(
+            "expense_routed",
+            f"Expense ${amount:.2f} from {submitter} routed to {route}",
+            route=route,
+            reasons=reason_codes,
+            amount=amount,
+            category=category,
+            submitter=submitter,
+        )
+
     review_reasons = "; ".join(reasons) if reasons else "none"
     ctx.state["expense_data"] = node_input
     return Event(
@@ -221,16 +258,24 @@ async def auto_approve(node_input: dict[str, Any], ctx: Context) -> Event:
         f"Expense auto-approved: ${amount:.2f} from {submitter} "
         f"for {category}" + (f' ("{description}")' if description else "") + "."
     )
-    log_entry = {
-        "severity": "INFO",
-        "message": f"Expense auto-approved: ${amount:.2f} from {submitter}",
-        "decision": "approved",
-        "amount": amount,
-        "submitter": submitter,
-        "category": category,
-    }
-    print(json.dumps(log_entry), flush=True)
-    await record_expense_decision(ctx, node_input, "approved")
+    with obs.span(
+        "expense.decision",
+        status="approved",
+        decided_by="auto",
+        amount_usd=amount,
+        submitter_id=obs.submitter_id(submitter),
+    ):
+        obs.decisions_counter.add(1, {"status": "approved", "decided_by": "auto"})
+        obs.log_event(
+            "expense_decided",
+            f"Expense auto-approved: ${amount:.2f} from {submitter}",
+            decision="approved",
+            decided_by="auto",
+            amount=amount,
+            submitter=submitter,
+            category=category,
+        )
+        await record_expense_decision(ctx, node_input, "approved")
     return Event(
         content=types.Content(
             role="model",
@@ -251,11 +296,12 @@ def emit_expense_alert(
     category: str,
     risk_summary: str,
 ) -> dict[str, Any]:
-    """Emit a structured log alerting finance to review a high-value expense.
+    """Emit a structured alert telling finance a flagged expense needs review.
 
-    Cloud Run captures JSON stdout as structured logs in Cloud Logging.
-    A log-based metric and alert policy trigger email notifications
-    when these logs appear.
+    The alert is a WARNING log with ``alert_type="expense_review"``, linked to
+    the current trace. A log-based metric and alert policy
+    (``deployment/terraform/single-project/monitoring.tf``) turn it into a
+    notification.
 
     Args:
         submitter: Who submitted the expense.
@@ -266,18 +312,21 @@ def emit_expense_alert(
     Returns:
         Confirmation that the alert was emitted.
     """
-    log_entry = {
-        "severity": "WARNING",
-        "message": (
-            f"Expense review alert: ${amount:.2f} from {submitter} — {risk_summary}"
-        ),
-        "alert_type": "expense_review",
-        "submitter": submitter,
-        "amount": amount,
-        "category": category,
-        "risk_summary": risk_summary,
-    }
-    print(json.dumps(log_entry), flush=True)
+    obs.set_attributes(
+        obs.trace.get_current_span(),
+        alert_type="expense_review",
+        amount_usd=amount,
+    )
+    obs.log_event(
+        "expense_review_alert",
+        f"Expense review alert: ${amount:.2f} from {submitter} — {risk_summary}",
+        severity="WARNING",
+        alert_type="expense_review",
+        submitter=submitter,
+        amount=amount,
+        category=category,
+        risk_summary=risk_summary,
+    )
     return {"status": "alert_emitted", "submitter": submitter, "amount": amount}
 
 
@@ -366,13 +415,6 @@ async def process_decision(node_input: Any, ctx: Context) -> Event:
     expense = ctx.state.get("expense_data", {})
     status = "approved" if approved else "rejected"
 
-    log_entry = {
-        "severity": "INFO" if approved else "WARNING",
-        "message": f"Expense {status} by manager",
-        "decision": status,
-    }
-    print(json.dumps(log_entry), flush=True)
-
     submitter = expense.get("submitter", "unknown")
     amount = float(expense.get("amount", 0))
     category = expense.get("category", "")
@@ -392,7 +434,25 @@ async def process_decision(node_input: Any, ctx: Context) -> Event:
         )
 
     final_message = " ".join(parts)
-    await record_expense_decision(ctx, expense, status)
+    with obs.span(
+        "expense.decision",
+        status=status,
+        decided_by="manager",
+        amount_usd=amount,
+        submitter_id=obs.submitter_id(submitter),
+    ):
+        obs.decisions_counter.add(1, {"status": status, "decided_by": "manager"})
+        obs.log_event(
+            "expense_decided",
+            f"Expense {status} by manager: ${amount:.2f} from {submitter}",
+            severity="INFO" if approved else "WARNING",
+            decision=status,
+            decided_by="manager",
+            amount=amount,
+            submitter=submitter,
+            category=category,
+        )
+        await record_expense_decision(ctx, expense, status)
     return Event(
         content=types.Content(
             role="model",

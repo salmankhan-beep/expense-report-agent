@@ -1,0 +1,14 @@
+metrics_to_run:
+  - custom_response_quality
+
+thresholds:
+  custom_response_quality: 4
+
+custom_metrics:
+  - name: custom_response_quality
+    custom_function_file: response_quality.py
+  - name: agent_turn_count
+    custom_function: |
+      def evaluate(instance):
+          turns = (instance.get("agent_data") or {}).get("turns", [])
+          return {'score': len(turns)}

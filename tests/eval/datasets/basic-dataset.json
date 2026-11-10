@@ -1,0 +1,47 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "auto_approve_meals_under_100",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"amount\": 45.00, \"submitter\": \"bob@company.com\", \"category\": \"meals\", \"description\": \"Team lunch\", \"date\": \"2026-04-12\"}"
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Expense auto-approved: $45.00 from bob@company.com for meals (\"Team lunch\")."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "review_travel_over_100",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"amount\": 250.00, \"submitter\": \"alice@company.com\", \"category\": \"travel\", \"description\": \"Flight to NYC for client meeting\", \"date\": \"2026-04-10\"}"
+          }
+        ]
+      }
+    },
+    {
+      "eval_case_id": "review_boundary_100",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "{\"amount\": 100.00, \"submitter\": \"carol@company.com\", \"category\": \"software\", \"description\": \"Annual dev tool license\", \"date\": \"2026-04-12\"}"
+          }
+        ]
+      }
+    }
+  ]
+}

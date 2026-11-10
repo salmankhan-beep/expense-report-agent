@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Expense Approvals · Manager Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #07080d;
+    --panel: rgba(255, 255, 255, 0.045);
+    --panel-strong: rgba(255, 255, 255, 0.075);
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --text: #eef0f7;
+    --muted: #8e93a8;
+    --accent: #8b7bff;
+    --accent-2: #4fd1ff;
+    --ok: #34d399;
+    --ok-glow: rgba(52, 211, 153, 0.35);
+    --bad: #fb7185;
+    --bad-glow: rgba(251, 113, 133, 0.35);
+    --warn: #fbbf24;
+    --radius: 20px;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font-family: "Outfit", system-ui, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  /* Radial glows */
+  .glow { position: fixed; border-radius: 50%; filter: blur(110px); opacity: 0.55; pointer-events: none; z-index: 0; }
+  .glow.a { width: 620px; height: 620px; background: #5b3dff; top: -220px; left: -160px; animation: drift 18s var(--ease) infinite alternate; }
+  .glow.b { width: 520px; height: 520px; background: #0ea5e9; bottom: -200px; right: -120px; opacity: 0.38; animation: drift 22s var(--ease) infinite alternate-reverse; }
+  .glow.c { width: 380px; height: 380px; background: #db2777; top: 40%; left: 55%; opacity: 0.18; }
+  @keyframes drift { to { transform: translate(60px, 40px) scale(1.08); } }
+
+  .shell { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 48px 28px 80px; }
+
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 36px; }
+  .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 var(--ok-glow); animation: pulse 2.2s infinite; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 10px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  h1 { font-size: clamp(32px, 4vw, 46px); font-weight: 600; letter-spacing: -0.02em; margin: 10px 0 6px; }
+  h1 span { background: linear-gradient(110deg, #fff 10%, var(--accent) 55%, var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { color: var(--muted); margin: 0; font-weight: 300; font-size: 16px; }
+
+  .glass {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 20px 50px -20px rgba(0,0,0,0.6);
+  }
+
+  .btn {
+    font: inherit; font-weight: 500; font-size: 14px; color: var(--text);
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 11px 18px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--border-strong); background: var(--panel-strong);
+    transition: transform .25s var(--ease), background .25s, border-color .25s, box-shadow .25s, opacity .2s;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(255,255,255,0.28); }
+  .btn:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn.approve { background: linear-gradient(135deg, rgba(52,211,153,0.22), rgba(16,185,129,0.12)); border-color: rgba(52,211,153,0.45); }
+  .btn.approve:hover:not(:disabled) { box-shadow: 0 8px 28px -8px var(--ok-glow); }
+  .btn.reject { background: linear-gradient(135deg, rgba(251,113,133,0.2), rgba(225,29,72,0.1)); border-color: rgba(251,113,133,0.42); }
+  .btn.reject:hover:not(:disabled) { box-shadow: 0 8px 28px -8px var(--bad-glow); }
+  .btn svg { width: 16px; height: 16px; }
+  .spin { width: 15px; height: 15px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.25); border-top-color: #fff; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .btn.refresh.loading svg { animation: spin 0.9s linear infinite; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 30px; }
+  .stat { padding: 20px 22px; }
+  .stat .label { font-size: 13px; color: var(--muted); letter-spacing: 0.04em; }
+  .stat .value { font-size: 30px; font-weight: 600; margin-top: 6px; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .stat .value.small { font-size: 16px; font-weight: 400; color: var(--muted); margin-top: 14px; }
+
+  /* Cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
+  .card { padding: 24px; display: flex; flex-direction: column; gap: 18px; position: relative; overflow: hidden;
+          transition: transform .45s var(--ease), border-color .3s, opacity .45s var(--ease), box-shadow .3s;
+          animation: rise .6s var(--ease) both; }
+  .card::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+                  background: radial-gradient(500px circle at var(--mx, 50%) var(--my, 0%), rgba(139,123,255,0.14), transparent 40%);
+                  opacity: 0; transition: opacity .3s; }
+  .card:hover { border-color: var(--border-strong); transform: translateY(-3px); }
+  .card:hover::before { opacity: 1; }
+  .card.leaving { opacity: 0; transform: translateY(-10px) scale(0.96); }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  .card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .amount { font-size: 34px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .amount small { font-size: 16px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .pill { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border-strong); background: rgba(255,255,255,0.05); text-transform: capitalize; white-space: nowrap; }
+  .risk-low { color: var(--ok); border-color: rgba(52,211,153,0.4); background: rgba(52,211,153,0.08); }
+  .risk-medium { color: var(--warn); border-color: rgba(251,191,36,0.4); background: rgba(251,191,36,0.08); }
+  .risk-high { color: var(--bad); border-color: rgba(251,113,133,0.45); background: rgba(251,113,133,0.09); }
+  .desc { font-size: 17px; line-height: 1.45; margin: 0; }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .insight { font-size: 14px; line-height: 1.5; color: #c9cce0; padding: 12px 14px; border-radius: 12px; background: rgba(139,123,255,0.07); border: 1px solid rgba(139,123,255,0.18); }
+  .insight b { color: var(--accent); font-weight: 500; display: block; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: auto; }
+  .locked { font-size: 13px; color: var(--muted); text-align: center; padding: 10px; border: 1px dashed var(--border-strong); border-radius: 12px; }
+
+  .empty { text-align: center; padding: 70px 24px; }
+  .empty .ring { width: 74px; height: 74px; margin: 0 auto 18px; border-radius: 50%; display: grid; place-items: center;
+                 background: radial-gradient(circle, rgba(52,211,153,0.22), transparent 70%); border: 1px solid rgba(52,211,153,0.35); }
+  .empty h3 { margin: 0 0 6px; font-weight: 500; font-size: 20px; }
+  .empty p { margin: 0; color: var(--muted); }
+  .skeleton { height: 290px; border-radius: var(--radius); background: linear-gradient(100deg, var(--panel) 30%, rgba(255,255,255,0.08) 50%, var(--panel) 70%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border: 1px solid var(--border); }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  /* Slide-out drawer */
+  .scrim { position: fixed; inset: 0; background: rgba(3,4,8,0.55); backdrop-filter: blur(4px); opacity: 0; pointer-events: none; transition: opacity .4s var(--ease); z-index: 20; }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+  .drawer { position: fixed; top: 14px; right: 14px; bottom: 14px; width: min(500px, calc(100vw - 28px)); z-index: 21;
+            transform: translateX(calc(100% + 30px)); transition: transform .55s var(--ease); display: flex; flex-direction: column; overflow: hidden;
+            background: rgba(16,17,26,0.82); }
+  .drawer.open { transform: translateX(0); }
+  .drawer-head { padding: 26px 28px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .drawer-head h2 { margin: 6px 0 0; font-weight: 600; font-size: 24px; }
+  .close { width: 36px; height: 36px; padding: 0; border-radius: 10px; }
+  .drawer-body { padding: 24px 28px 32px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+  .verdict { display: flex; align-items: center; gap: 14px; padding: 18px; border-radius: 16px; }
+  .verdict .icon { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; flex: none; }
+  .verdict.approved { background: rgba(52,211,153,0.09); border: 1px solid rgba(52,211,153,0.35); }
+  .verdict.approved .icon { background: rgba(52,211,153,0.18); color: var(--ok); }
+  .verdict.rejected { background: rgba(251,113,133,0.09); border: 1px solid rgba(251,113,133,0.35); }
+  .verdict.rejected .icon { background: rgba(251,113,133,0.18); color: var(--bad); }
+  .verdict .title { font-weight: 600; font-size: 18px; text-transform: capitalize; }
+  .verdict .msg { color: #c9cce0; font-size: 14px; line-height: 1.5; margin-top: 3px; }
+  .section-title { font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .review { font-size: 14.5px; line-height: 1.65; color: #d6d8e6; padding: 18px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border); }
+  .review h3, .review h4 { margin: 0 0 10px; font-size: 16px; font-weight: 600; color: var(--text); }
+  .review ul { margin: 6px 0; padding-left: 20px; }
+  .review li { margin: 4px 0; }
+  .review strong { color: var(--text); font-weight: 600; }
+
+  /* Toast */
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 30px); opacity: 0; z-index: 30;
+           padding: 13px 18px; border-radius: 14px; font-size: 14px; transition: all .4s var(--ease); max-width: min(560px, 92vw); }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.error { border-color: rgba(251,113,133,0.45); }
+
+  @media (max-width: 720px) { .stats { grid-template-columns: 1fr; } .shell { padding-top: 32px; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="glow a"></div><div class="glow b"></div><div class="glow c"></div>
+
+<main class="shell">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="pulse"></span>Ambient Expense Agent · Live</div>
+      <h1><span>Expense approvals</span></h1>
+      <p class="sub">Claims of $100 or more, paused by the agent for your decision.</p>
+    </div>
+    <button class="btn refresh" id="refresh" title="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      Refresh
+    </button>
+  </header>
+
+  <section class="stats">
+    <div class="glass stat"><div class="label">Awaiting decision</div><div class="value" id="stat-count">–</div></div>
+    <div class="glass stat"><div class="label">Total pending</div><div class="value" id="stat-total">–</div></div>
+    <div class="glass stat"><div class="label">Last synced</div><div class="value small" id="stat-sync">–</div></div>
+  </section>
+
+  <section class="grid" id="grid">
+    <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer glass" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div><div class="eyebrow">Compliance review</div><h2 id="drawer-title">Decision recorded</h2></div>
+    <button class="btn close" id="drawer-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<div class="toast glass" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(n) || 0);
+
+// Everything shown comes from employee-submitted data, so it is escaped.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Minimal, escape-first markdown for the agent's review (headings, bold, bullets).
+function renderMarkdown(md) {
+  const lines = esc(md).split("\n");
+  let html = "", inList = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    const bullet = line.match(/^\s*[-*]\s+(.*)/);
+    if (bullet) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${bullet[1]}</li>`; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    const h = line.match(/^#{1,4}\s+(.*)/);
+    if (h) html += `<h3>${h[1]}</h3>`;
+    else if (line.trim()) html += `<p style="margin:6px 0">${line}</p>`;
+  }
+  return html + (inList ? "</ul>" : "");
+}
+
+const riskOf = (review) => (String(review || "").match(/risk level\**\s*:?\**\s*(low|medium|high)/i) || [])[1]?.toLowerCase();
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = `toast glass show${isError ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = "toast glass"), 4200);
+}
+
+const icons = {
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+};
+
+function card(item) {
+  const e = item.expense || {};
+  const risk = riskOf(item.review);
+  const el = document.createElement("article");
+  el.className = "card glass";
+  el.innerHTML = `
+    <div class="card-top">
+      <div class="amount">${esc(money(e.amount))}<small>USD</small></div>
+      ${risk ? `<span class="pill risk-${risk}">${risk} risk</span>` : `<span class="pill">${esc(e.category || "expense")}</span>`}
+    </div>
+    <p class="desc">${esc(e.description || "No description provided")}</p>
+    <dl class="meta">
+      <dt>Submitter</dt><dd title="${esc(e.submitter)}">${esc(e.submitter || "unknown")}</dd>
+      <dt>Category</dt><dd>${esc(e.category || "–")}</dd>
+      <dt>Date</dt><dd>${esc(e.date || "–")}</dd>
+    </dl>
+    ${item.risk_summary ? `<div class="insight"><b>Agent's flag</b>${esc(item.risk_summary)}</div>` : ""}
+    ${item.actionable
+      ? `<div class="actions">
+           <button class="btn reject" data-approve="false">${icons.x}<span>Reject</span></button>
+           <button class="btn approve" data-approve="true">${icons.check}<span>Approve</span></button>
+         </div>`
+      : `<div class="locked">Owned by “${esc(item.user_id)}” — can't be resumed from this dashboard</div>`}`;
+
+  el.addEventListener("pointermove", (ev) => {
+    const r = el.getBoundingClientRect();
+    el.style.setProperty("--mx", `${ev.clientX - r.left}px`);
+    el.style.setProperty("--my", `${ev.clientY - r.top}px`);
+  });
+  el.querySelectorAll("[data-approve]").forEach((btn) =>
+    btn.addEventListener("click", () => decide(item, btn.dataset.approve === "true", el, btn)));
+  return el;
+}
+
+function renderStats(items) {
+  $("stat-count").textContent = items.length;
+  $("stat-total").textContent = money(items.reduce((s, i) => s + (Number(i.expense?.amount) || 0), 0));
+  $("stat-sync").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function renderEmpty() {
+  $("grid").innerHTML = `
+    <div class="glass empty" style="grid-column: 1 / -1">
+      <div class="ring">${icons.check.replace('stroke="currentColor"', 'stroke="#34d399"').replace("<svg", '<svg width="30" height="30"')}</div>
+      <h3>You're all caught up</h3>
+      <p>No expenses are waiting for approval. New claims of $100+ appear here automatically.</p>
+    </div>`;
+}
+
+let loading = false;
+async function load({ quiet = false } = {}) {
+  if (loading) return;
+  loading = true;
+  $("refresh").classList.add("loading");
+  try {
+    const res = await fetch("/api/pending");
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    const items = await res.json();
+    renderStats(items);
+    const grid = $("grid");
+    grid.innerHTML = "";
+    if (!items.length) renderEmpty();
+    else items.forEach((item, i) => { const c = card(item); c.style.animationDelay = `${i * 60}ms`; grid.appendChild(c); });
+  } catch (err) {
+    if (!quiet) toast(`Couldn't load approvals: ${err.message}`, true);
+  } finally {
+    loading = false;
+    $("refresh").classList.remove("loading");
+  }
+}
+
+async function decide(item, approved, el, btn) {
+  const buttons = el.querySelectorAll("[data-approve]");
+  buttons.forEach((b) => (b.disabled = true));
+  const label = btn.querySelector("span").textContent;
+  btn.querySelector("svg").outerHTML = '<span class="spin"></span>';
+  btn.querySelector("span:not(.spin)").textContent = approved ? "Approving…" : "Rejecting…";
+  try {
+    const res = await fetch(`/api/action/${encodeURIComponent(item.session_id)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interrupt_id: item.interrupt_id, approved }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    el.classList.add("leaving");
+    setTimeout(() => load({ quiet: true }), 420);
+    openDrawer(data);
+  } catch (err) {
+    toast(err.message, true);
+    btn.querySelector(".spin").outerHTML = approved ? icons.check : icons.x;
+    btn.querySelector("span").textContent = label;
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+function openDrawer(data) {
+  const ok = data.status === "approved";
+  const e = data.expense || {};
+  $("drawer-title").textContent = `${money(e.amount)} · ${e.submitter || "expense"}`;
+  $("drawer-body").innerHTML = `
+    <div class="verdict ${ok ? "approved" : "rejected"}">
+      <div class="icon">${ok ? icons.check : icons.x}</div>
+      <div><div class="title">${esc(data.status || "decided")}</div><div class="msg">${esc(data.message)}</div></div>
+    </div>
+    ${data.risk_summary ? `<div><p class="section-title">Agent's flag</p><div class="insight">${esc(data.risk_summary)}</div></div>` : ""}
+    <div><p class="section-title">Agent's compliance review</p>
+      <div class="review">${data.review ? renderMarkdown(data.review) : '<span style="color:var(--muted)">No review was recorded for this expense.</span>'}</div>
+    </div>`;
+  $("drawer").classList.add("open");
+  $("drawer").setAttribute("aria-hidden", "false");
+  $("scrim").classList.add("open");
+}
+function closeDrawer() {
+  $("drawer").classList.remove("open");
+  $("drawer").setAttribute("aria-hidden", "true");
+  $("scrim").classList.remove("open");
+}
+
+$("refresh").addEventListener("click", () => load());
+$("drawer-close").addEventListener("click", closeDrawer);
+$("scrim").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+
+load();
+setInterval(() => document.visibilityState === "visible" && load({ quiet: true }), 20000);
+</script>
+</body>
+</html>

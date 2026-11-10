@@ -1,0 +1,15 @@
+[project]
+name = "submission-frontend"
+version = "0.1.0"
+description = "Manager dashboard for reviewing expenses paused by the ambient expense agent on Agent Runtime."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "google-adk>=2.12.0,<3.0.0",
+    "google-cloud-aiplatform[agent_engines]>=2.2.0,<3.0.0",
+    "truststore>=0.10.0",
+]
+
+[tool.uv]
+package = false

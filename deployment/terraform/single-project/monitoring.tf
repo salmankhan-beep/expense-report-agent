@@ -73,7 +73,7 @@ resource "google_logging_metric" "expense_routing" {
     labels {
       key         = "route"
       value_type  = "STRING"
-      description = "AUTO_APPROVE or NEEDS_REVIEW"
+      description = "AUTO_APPROVE, STANDARD_REVIEW, or DEEP_REVIEW"
     }
   }
 

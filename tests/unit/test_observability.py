@@ -48,7 +48,8 @@ def test_route_span_explains_the_decision(spans) -> None:
 
     (route,) = by_name(spans, "expense.route")
     attrs = dict(route.attributes)
-    assert attrs["expense.route"] == "NEEDS_REVIEW"
+    assert attrs["expense.route"] == "DEEP_REVIEW"
+    assert attrs["expense.complexity"] == "duplicate"
     assert attrs["expense.reasons"] == "duplicate"
     assert attrs["expense.duplicate"] is True
     assert attrs["expense.history_records"] == 1
@@ -90,7 +91,8 @@ def test_logs_carry_trace_and_span_ids(spans, capsys, monkeypatch) -> None:
     assert entry["logging.googleapis.com/spanId"] == format(
         route.context.span_id, "016x"
     )
-    assert entry["route"] == "NEEDS_REVIEW"
+    assert entry["route"] == "DEEP_REVIEW"  # $250 is > 2x the $75 meals limit
+    assert entry["review_model"]
     assert entry["reasons"] == ["threshold", "policy_limit"]
 
 

@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_DEEP_MODEL = "gemini-3.1-pro-preview"
 
 
 def _env_flag(name: str) -> bool | None:
@@ -70,8 +71,16 @@ else:
 class ExpenseAgentConfig:
     """Agent configuration with sensible defaults."""
 
+    # Standard review: fast, inexpensive model for straightforward flagged claims.
     model: str = os.getenv("MODEL_NAME", DEFAULT_MODEL)
+    # Deep review: stronger reasoning model for complex or high-risk claims.
+    deep_review_model: str = os.getenv("DEEP_REVIEW_MODEL_NAME", DEFAULT_DEEP_MODEL)
+    # Claims at or above this go to human review.
     review_threshold: float = 100.0
+    # Claims at or above this get the deep-review model.
+    deep_review_amount: float = 1000.0
+    # Claims above this multiple of their category limit get the deep-review model.
+    deep_review_limit_multiple: float = 2.0
 
 
 config = ExpenseAgentConfig()

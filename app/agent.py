@@ -175,18 +175,26 @@ def parse_expense_email(node_input: Any) -> Event:
 
 
 async def route_by_amount(node_input: dict[str, Any], ctx: Context) -> Event:
-    """Decide in code whether an expense can be auto-approved.
+    """Decide in code whether a claim is auto-approved, and which model reviews it.
 
-    Routes to ``NEEDS_REVIEW`` when any of these hold, else ``AUTO_APPROVE``:
+    A claim needs human review when any of these hold:
 
     - the amount is at or above the $100 review threshold,
     - the amount exceeds the category's per-claim policy limit,
     - the submitter already claimed the same amount on the same date
       (checked against expense history in memory).
 
-    The reasons are stored in state for the reviewer, along with the expense
-    data used by the approval step. Keeping this in code means text inside an
-    expense cannot talk its way past review.
+    Claims needing review are then sent to a model matched to their complexity:
+
+    - ``DEEP_REVIEW`` (stronger reasoning model) for high value (>= $1000),
+      more than double the category limit, a suspected duplicate, or history
+      that couldn't be checked;
+    - ``STANDARD_REVIEW`` (fast model) for everything else that needs review.
+
+    Routine claims go to ``AUTO_APPROVE`` with no model at all. The reasons
+    are stored in state for the reviewer, along with the expense data used by
+    the approval step. Keeping this in code means text inside an expense
+    cannot talk its way past review or pick its own reviewer.
     """
     amount = float(node_input.get("amount", 0) or 0)
     category = normalize_category(str(node_input.get("category", "")))
@@ -226,11 +234,28 @@ async def route_by_amount(node_input: dict[str, Any], ctx: Context) -> Event:
             reasons.append("same amount already claimed by this submitter on this date")
             reason_codes.append("duplicate")
 
-        route = "NEEDS_REVIEW" if reasons else "AUTO_APPROVE"
+        complexity: list[str] = []
+        if amount >= config.deep_review_amount:
+            complexity.append("high_value")
+        if amount > limit * config.deep_review_limit_multiple:
+            complexity.append("far_over_limit")
+        if is_duplicate:
+            complexity.append("duplicate")
+        if "history_unavailable" in reason_codes:
+            complexity.append("history_unavailable")
+
+        if not reasons:
+            route, review_model = "AUTO_APPROVE", "none"
+        elif complexity:
+            route, review_model = "DEEP_REVIEW", config.deep_review_model
+        else:
+            route, review_model = "STANDARD_REVIEW", config.model
         obs.set_attributes(
             route_span,
             route=route,
             reasons=",".join(reason_codes) or "none",
+            complexity=",".join(complexity) or "none",
+            review_model=review_model,
             history_records=len(history),
             duplicate=is_duplicate,
         )
@@ -243,6 +268,8 @@ async def route_by_amount(node_input: dict[str, Any], ctx: Context) -> Event:
             f"Expense ${amount:.2f} from {submitter} routed to {route}",
             route=route,
             reasons=reason_codes,
+            complexity=complexity,
+            review_model=review_model,
             amount=amount,
             category=category,
             submitter=submitter,
@@ -253,7 +280,12 @@ async def route_by_amount(node_input: dict[str, Any], ctx: Context) -> Event:
     return Event(
         route=route,
         output=node_input,
-        state={"expense_data": node_input, "review_reasons": review_reasons},
+        state={
+            "expense_data": node_input,
+            "review_reasons": review_reasons,
+            "complexity_reasons": ", ".join(complexity) or "none",
+            "review_model": review_model,
+        },
     )
 
 
@@ -296,20 +328,10 @@ async def auto_approve(node_input: dict[str, Any], ctx: Context) -> Event:
 
 
 # ---------------------------------------------------------------------------
-# LLM review agent (invoked only for expenses flagged by route_by_amount)
+# LLM reviewers, one per complexity tier (chosen by route_by_amount)
 # ---------------------------------------------------------------------------
 
-
-review_agent = Agent(
-    name="review_agent",
-    model=Gemini(
-        model=config.model or MODEL,
-        retry_options=types.HttpRetryOptions(attempts=3),
-    ),
-    mode="single_turn",
-    instruction="""You are an expense review agent. You receive expense reports
-that were flagged for human review before approval.
-
+REVIEW_INSTRUCTIONS = """
 Why it was flagged (decided by code, not by you): {review_reasons?}
 
 Investigate with your tools before writing the review:
@@ -336,14 +358,46 @@ Your review MUST include:
 - **Duplicate check**: Result of the duplicate check
 - **Risk level**: low, medium, or high
 - **Risk factors**: What flags you found (if any)
-- **Recommendation**: approve, request-more-info, or escalate""",
-    input_schema=ExpenseData,
-    tools=[
-        lookup_expense_policy,
-        get_spending_history,
-        check_duplicate_claims,
-        emit_expense_alert,
-    ],
+- **Recommendation**: approve, request-more-info, or escalate"""
+
+REVIEW_TOOLS = [
+    lookup_expense_policy,
+    get_spending_history,
+    check_duplicate_claims,
+    emit_expense_alert,
+]
+
+
+def _reviewer(name: str, model: str, role: str) -> Agent:
+    return Agent(
+        name=name,
+        model=Gemini(model=model, retry_options=types.HttpRetryOptions(attempts=3)),
+        mode="single_turn",
+        instruction=role + "\n\n" + REVIEW_INSTRUCTIONS,
+        input_schema=ExpenseData,
+        tools=REVIEW_TOOLS,
+    )
+
+
+# Fast model for straightforward flagged claims.
+review_agent = _reviewer(
+    "review_agent",
+    config.model or MODEL,
+    "You are an expense review agent. You receive expense reports that were "
+    "flagged for human review before approval.",
+)
+
+# Stronger reasoning model for complex or high-risk claims.
+senior_review_agent = _reviewer(
+    "senior_review_agent",
+    config.deep_review_model,
+    "You are a senior expense reviewer. You receive the complex, high-risk "
+    "expense reports that need closer scrutiny before a manager decides.\n\n"
+    "Escalated to you because: {complexity_reasons?}\n\n"
+    "Be thorough: reconcile the claim against every policy rule, compare it "
+    "with the submitter's history (totals, frequency, similar claims), and "
+    "explain each risk factor with the evidence behind it. Use 'escalate' "
+    "when the evidence points to fraud or a serious policy breach.",
 )
 
 
@@ -451,10 +505,13 @@ root_agent = Workflow(
             route_by_amount,
             {
                 "AUTO_APPROVE": auto_approve,
-                "NEEDS_REVIEW": review_agent,
+                "STANDARD_REVIEW": review_agent,
+                "DEEP_REVIEW": senior_review_agent,
             },
         ),
-        (review_agent, request_approval, process_decision),
+        (review_agent, request_approval),
+        (senior_review_agent, request_approval),
+        (request_approval, process_decision),
     ],
 )
 

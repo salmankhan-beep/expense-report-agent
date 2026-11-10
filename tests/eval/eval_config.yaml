@@ -14,8 +14,9 @@ custom_metrics:
 
   # Deterministic trajectory check, independent of the agent's own routing code:
   # it derives the expected route from the claim (threshold and a copy of the
-  # per-category limits in app/expense_policy.py). Flagged claims must be
-  # investigated with the policy and duplicate tools and then pause for a human;
+  # per-category limits in app/expense_policy.py). Flagged claims must reach the
+  # right reviewer tier (senior for >= $1000 or > 2x the limit), be investigated
+  # with the policy and duplicate tools, and then pause for a human;
   # routine claims must do neither. (The grader drops content-less events, so
   # the agent's state deltas aren't visible here.)
   - name: review_trajectory
@@ -46,6 +47,8 @@ custom_metrics:
           category = ALIASES.get(category, category)
           limit = LIMITS.get(category, LIMITS["other"])
           flagged = amount >= 100 or amount > limit
+          deep = amount >= 1000 or amount > 2 * limit
+          expected_reviewer = "senior_review_agent" if deep else "review_agent"
 
           calls = [
               part["function_call"].get("name")
@@ -54,12 +57,20 @@ custom_metrics:
               for part in (e.get("content") or {}).get("parts") or []
               if isinstance(part, dict) and part.get("function_call")
           ]
+          authors = {
+              e.get("author")
+              for turn in (instance.get("agent_data") or {}).get("turns", [])
+              for e in turn.get("events", [])
+          }
           if flagged:
               required = {"lookup_expense_policy", "check_duplicate_claims", "adk_request_input"}
               missing = sorted(required - set(calls))
               if missing:
                   return {"score": 0, "explanation": f"${amount:.2f} {category} should be reviewed; missing {missing}"}
-              return {"score": 1, "explanation": f"${amount:.2f} {category} reviewed with tools, then paused."}
+              if expected_reviewer not in authors:
+                  seen = sorted(a for a in authors if a and a.endswith("review_agent"))
+                  return {"score": 0, "explanation": f"${amount:.2f} {category} should go to {expected_reviewer}; reviewers seen: {seen}"}
+              return {"score": 1, "explanation": f"${amount:.2f} {category} reviewed by {expected_reviewer} with tools, then paused."}
           if calls:
               return {"score": 0, "explanation": f"${amount:.2f} {category} is routine but called {calls}"}
           return {"score": 1, "explanation": f"${amount:.2f} {category} auto-approved with no tools or pause."}

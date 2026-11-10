@@ -18,11 +18,15 @@ Expense reports arrive as events and flow through a graph workflow:
 
 - **Routine claims** (under $100, within the category's policy limit, and not a
   duplicate): approved instantly by deterministic code, with no LLM call and no human.
-- **Everything else**: a Gemini review agent investigates with tools (company
+- **Everything else**: a Gemini reviewer investigates with tools (company
   policy, the employee's remembered spending history, a duplicate check), raises
   an alert, then the workflow **pauses for a human decision** (`RequestInput`).
   A manager approves or rejects from the dashboard, and the paused run resumes
   where it stopped.
+- **The model matches the claim's complexity**: straightforward flagged claims
+  get a fast Flash reviewer; high-value, far-over-limit, duplicate, or
+  unverifiable claims get a senior reviewer on a Pro reasoning model. Routine
+  claims use no model at all.
 - **Every decision is remembered** in Memory Bank, so later claims from the same
   employee are judged against their history.
 
@@ -35,11 +39,14 @@ human review.
 ```mermaid
 flowchart LR
     E["Expense event (Pub/Sub push, JSON, or text)"] --> P[parse_expense_email]
-    P --> R{"route_by_amount: threshold, policy limit, duplicate?"}
-    R -- "routine" --> A[auto_approve]
-    R -- "flagged" --> V["review_agent (Gemini)"]
+    P --> R{"route_by_amount: needs review? how complex?"}
+    R -- "routine (no model)" --> A[auto_approve]
+    R -- "STANDARD_REVIEW" --> V["review_agent (Gemini Flash)"]
+    R -- "DEEP_REVIEW" --> SV["senior_review_agent (Gemini Pro)"]
     V -- tools --> T["lookup_expense_policy / get_spending_history / check_duplicate_claims / emit_expense_alert"]
+    SV -- tools --> T
     V --> Q["request_approval (RequestInput: pause)"]
+    SV --> Q
     Q -. "manager decision" .-> D[process_decision]
     A -- "record decision" --> MB[(Memory Bank)]
     D -- "record decision" --> MB
@@ -66,9 +73,19 @@ flowchart LR
 ## How it maps to the assessment criteria
 
 - **Orchestration & logic.** An ADK 2.0 `Workflow` that mixes async function nodes
-  and an LLM agent. Routing is rule-based in code (threshold, per-category policy
-  limit, duplicate detection), the LLM is used only for judgment, and a
-  human-in-the-loop pause resumes later across separate requests.
+  and LLM agents. Routing is rule-based in code (threshold, per-category policy
+  limit, duplicate detection), and so is **model selection by complexity**:
+
+  | Route | Model | When |
+  |---|---|---|
+  | `AUTO_APPROVE` | none | Under $100, within the category limit, not a duplicate |
+  | `STANDARD_REVIEW` | `gemini-3.8-flash` | Needs review, but straightforward |
+  | `DEEP_REVIEW` | `gemini-3.1-pro-preview` | $1,000+, more than 2x the category limit, a suspected duplicate, or history unavailable |
+
+  Both reviewers share tools and instructions; the senior one is told why it was
+  escalated and asked for deeper reconciliation. Models are configurable with
+  `MODEL_NAME` and `DEEP_REVIEW_MODEL_NAME`. Either tier ends in a
+  human-in-the-loop pause that resumes later across separate requests.
 - **Tool & interface design.** Four tools for the reviewer:
   `lookup_expense_policy`, `get_spending_history`, `check_duplicate_claims`, and
   `emit_expense_alert`. Inputs are validated with Pydantic (email, positive
@@ -190,9 +207,10 @@ traces automatically):
 
 ```text
 invoke_workflow ambient_expense_agent
-├── expense.route          route=NEEDS_REVIEW  reasons=policy_limit,duplicate
+├── expense.route          route=DEEP_REVIEW  reasons=policy_limit,duplicate
+│                          complexity=duplicate  review_model=gemini-3.1-pro-preview
 │   └── memory.recall      records=1  memories_returned=3
-├── invoke_agent review_agent
+├── invoke_agent senior_review_agent
 │   ├── call_llm / generate_content
 │   ├── execute_tool lookup_expense_policy
 │   ├── execute_tool get_spending_history  →  memory.recall
@@ -205,7 +223,7 @@ invoke_workflow ambient_expense_agent
 
 | `event` | When | Key fields |
 |---|---|---|
-| `expense_routed` | Every claim | `route`, `reasons`, `amount`, `category` |
+| `expense_routed` | Every claim | `route`, `reasons`, `complexity`, `review_model`, `amount` |
 | `expense_review_alert` | Reviewer raises an alert (WARNING) | `alert_type`, `risk_summary` |
 | `expense_decided` | Auto-approval or manager decision | `decision`, `decided_by` |
 

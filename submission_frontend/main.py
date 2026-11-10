@@ -156,8 +156,9 @@ def find_pending_requests(events: list[Any]) -> list[dict[str, Any]]:
                 answered.add(response.id)
 
             text = getattr(part, "text", None)
+            # Either reviewer tier: review_agent (fast) or senior_review_agent (deep).
             if (
-                author == "review_agent"
+                (author or "").endswith("review_agent")
                 and text
                 and not getattr(part, "thought", False)
             ):

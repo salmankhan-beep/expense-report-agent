@@ -48,12 +48,17 @@ from app.tools import (
 class FakeContext:
     """Just enough of ADK's Context for routing and tools."""
 
-    def __init__(self, facts: list[str] | None = None):
+    def __init__(self, facts: list[str] | None = None, memory: str = "ok"):
         self.state: dict[str, Any] = {}
         self.facts = list(facts or [])
         self.written: list[str] = []
+        self.memory = memory  # "ok", "missing" (not configured), or "broken"
 
     async def search_memory(self, query: str):
+        if self.memory == "missing":
+            raise ValueError("Memory service is not available.")
+        if self.memory == "broken":
+            raise ConnectionError("Memory Bank timed out")
         memories = [
             SimpleNamespace(
                 content=types.Content(role="user", parts=[types.Part(text=f)])
@@ -201,9 +206,10 @@ def test_normalize_category(raw, category) -> None:
 
 def test_lookup_expense_policy() -> None:
     policy = lookup_expense_policy("dinner")
-    assert policy["category"] == "meals"
-    assert policy["per_claim_limit_usd"] == 75.0
-    assert policy["rules"]
+    assert policy.category == "meals"
+    assert policy.per_claim_limit_usd == 75.0
+    assert policy.rules
+    assert policy.status == "ok"
 
 
 def test_spending_history_filters_to_submitter() -> None:
@@ -217,14 +223,75 @@ def test_spending_history_filters_to_submitter() -> None:
         ]
     )
     history = run(get_spending_history("bob@company.com", ctx))
-    assert history["claims_recalled"] == 3
-    assert history["approved_total_usd"] == 100.0
-    assert history["rejected_count"] == 1
+    assert history.claims_recalled == 3
+    assert history.approved_total_usd == 100.0
+    assert history.rejected_count == 1
 
 
 def test_check_duplicate_claims_tool() -> None:
     ctx = FakeContext([format_record(expense(), "approved")])
     hit = run(check_duplicate_claims("bob@company.com", 45.0, "2026-04-12", ctx))
     miss = run(check_duplicate_claims("bob@company.com", 45.0, "2026-04-20", ctx))
-    assert hit["is_duplicate"] is True
-    assert miss["is_duplicate"] is False
+    assert hit.is_duplicate is True
+    assert miss.is_duplicate is False
+
+
+# --- tool errors return recovery instructions -----------------------------
+
+
+def test_history_rejects_invalid_submitter_with_recovery() -> None:
+    result = run(get_spending_history("not-an-email", FakeContext()))
+    assert result.status == "error"
+    assert "email" in result.error
+    assert "submitter" in result.recovery
+
+
+@pytest.mark.parametrize(
+    ("amount", "date", "problem"),
+    [(45.0, "12/04/2026", "YYYY-MM-DD"), (-5.0, "2026-04-12", "greater than 0")],
+)
+def test_duplicate_check_rejects_bad_input_with_recovery(amount, date, problem) -> None:
+    result = run(check_duplicate_claims("bob@company.com", amount, date, FakeContext()))
+    assert result.status == "error"
+    assert problem in result.error
+    assert result.recovery
+    assert result.is_duplicate is None  # never a guessed answer
+
+
+@pytest.mark.parametrize("mode", ["missing", "broken"])
+def test_memory_failure_gives_recovery_not_a_crash(mode) -> None:
+    ctx = FakeContext(memory=mode)
+    history = run(get_spending_history("bob@company.com", ctx))
+    dup = run(check_duplicate_claims("bob@company.com", 45.0, "2026-04-12", ctx))
+    for result in (history, dup):
+        assert result.status == "error"
+        assert "unavailable" in result.error
+        assert "request-more-info" in result.recovery
+
+
+def test_alert_requires_risk_summary() -> None:
+    from app.tools import emit_expense_alert
+
+    bad = emit_expense_alert("bob@company.com", 150.0, "meals", "  ")
+    good = emit_expense_alert("bob@company.com", 150.0, "meals", "Over the limit.")
+    assert bad.status == "error" and bad.recovery
+    assert good.status == "ok" and good.alert_emitted is True
+
+
+def test_unknown_category_is_flagged_as_inexact() -> None:
+    assert lookup_expense_policy("spaceship").matched_exactly is False
+    assert lookup_expense_policy("dinner").matched_exactly is True
+
+
+# --- routing when memory fails ---------------------------------------------
+
+
+def test_routing_fails_safe_when_memory_is_broken() -> None:
+    event = run(route_by_amount(expense(), FakeContext(memory="broken")))
+    assert event.actions.route == "NEEDS_REVIEW"
+    assert "could not be checked" in event.actions.state_delta["review_reasons"]
+
+
+def test_routing_without_memory_service_still_auto_approves() -> None:
+    event = run(route_by_amount(expense(), FakeContext(memory="missing")))
+    assert event.actions.route == "AUTO_APPROVE"

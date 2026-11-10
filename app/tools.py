@@ -34,9 +34,19 @@ from google.adk.agents.context import Context
 from google.adk.events.event import Event
 from google.adk.memory.memory_entry import MemoryEntry
 from google.genai import types
+from pydantic import ValidationError
 
 from app import observability as obs
 from app.expense_policy import EXPENSE_POLICY, normalize_category
+from app.schemas import (
+    AlertResult,
+    ClaimKey,
+    DuplicateCheckResult,
+    ExpenseRecord,
+    PolicyLookupResult,
+    SpendingHistoryResult,
+    SubmitterRef,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,17 +112,36 @@ def find_duplicates(
 # ---------------------------------------------------------------------------
 
 
+class MemoryUnavailableError(RuntimeError):
+    """Expense history could not be read.
+
+    ``configured`` is False when no memory service exists at all (memory is
+    simply off), True when a configured service failed.
+    """
+
+    def __init__(self, message: str, *, configured: bool):
+        super().__init__(message)
+        self.configured = configured
+
+
 async def recall_records(ctx: Context, submitter: str) -> list[dict[str, Any]]:
-    """Recall this submitter's past expense records from memory."""
+    """Recall this submitter's past expense records from memory.
+
+    Raises:
+        MemoryUnavailableError: if history can't be read.
+    """
     who = _clean(submitter).lower()
     with obs.span("memory.recall", submitter_id=obs.submitter_id(who)) as recall_span:
         try:
             response = await ctx.search_memory(f"{RECORD_PREFIX} submitter={who}")
-        except ValueError:
-            # No memory service configured (e.g. a bare Runner in tests).
-            logger.warning("Memory service unavailable; no expense history recalled.")
+        except ValueError as exc:
+            # Raised by ADK when no memory service is configured.
             obs.set_attributes(recall_span, memory_available=False, records=0)
-            return []
+            raise MemoryUnavailableError(str(exc), configured=False) from exc
+        except Exception as exc:
+            logger.exception("Memory recall failed.")
+            obs.set_attributes(recall_span, memory_available=False, records=0)
+            raise MemoryUnavailableError(str(exc), configured=True) from exc
         records = []
         seen: set[str] = set()
         for memory in response.memories:
@@ -167,7 +196,22 @@ async def record_expense_decision(
 # ---------------------------------------------------------------------------
 
 
-def lookup_expense_policy(category: str) -> dict[str, Any]:
+_HISTORY_NOTE = (
+    "Recall returns the most relevant remembered claims for this submitter, "
+    "not a complete ledger."
+)
+_MEMORY_DOWN_RECOVERY = (
+    "Do not retry. Continue the review without history: say in the review "
+    "that history and duplicate checks were unavailable, raise the risk level "
+    "by one step, and recommend request-more-info."
+)
+
+
+def _invalid_input(exc: ValidationError) -> str:
+    return "; ".join(e["msg"] for e in exc.errors())
+
+
+def lookup_expense_policy(category: str) -> PolicyLookupResult:
     """Look up the company expense policy for a category.
 
     Args:
@@ -175,54 +219,176 @@ def lookup_expense_policy(category: str) -> dict[str, Any]:
             "hotel". Unknown categories map to "other".
 
     Returns:
-        The matched policy category, its per-claim limit in USD, the amount
-        above which a receipt is required, and any category-specific rules.
+        status "ok" with the matched policy category, whether it matched
+        exactly, the per-claim limit in USD, the amount above which a receipt
+        is required, and category rules. On failure, status "error" with
+        recovery instructions.
     """
-    key = normalize_category(category)
-    policy = EXPENSE_POLICY[key]
-    return {
-        "category": key,
-        "per_claim_limit_usd": policy["per_claim_limit_usd"],
-        "receipt_required_over_usd": policy["receipt_required_over_usd"],
-        "rules": policy["rules"],
-    }
+    try:
+        submitted = (category or "").strip()
+        key = normalize_category(submitted)
+        policy = EXPENSE_POLICY[key]
+        matched = key == submitted.lower() or key != "other"
+        return PolicyLookupResult(
+            category=key,
+            matched_exactly=matched,
+            per_claim_limit_usd=policy["per_claim_limit_usd"],
+            receipt_required_over_usd=policy["receipt_required_over_usd"],
+            rules=list(policy["rules"]),
+        )
+    except Exception as exc:  # never let a policy-table problem crash the review
+        logger.exception("Policy lookup failed.")
+        return PolicyLookupResult(
+            status="error",
+            error=f"Policy lookup failed: {exc}",
+            recovery=(
+                "Retry once with category 'other'. If it still fails, state in the "
+                "review that policy limits could not be verified and recommend "
+                "request-more-info."
+            ),
+        )
 
 
-async def get_spending_history(submitter: str, tool_context: Context) -> dict[str, Any]:
+async def get_spending_history(
+    submitter: str, tool_context: Context
+) -> SpendingHistoryResult:
     """Recall a submitter's past expense claims and decisions from memory.
 
     Args:
-        submitter: The submitter's email address.
+        submitter: The submitter's email address, exactly as in the expense.
 
     Returns:
-        Recent recalled claims (amount, category, date, status), with the
-        claim count, the approved total, and the rejected count. This covers
-        the most relevant remembered claims, not a complete ledger.
+        status "ok" with recent recalled claims (amount, category, date,
+        status), the claim count, the approved total, and the rejected count.
+        Recall covers the most relevant remembered claims, not a complete
+        ledger. On failure, status "error" with recovery instructions.
     """
-    records = await recall_records(tool_context, submitter)
+    try:
+        ref = SubmitterRef(submitter=submitter)
+    except ValidationError as exc:
+        return SpendingHistoryResult(
+            status="error",
+            error=f"Invalid input: {_invalid_input(exc)}",
+            recovery=(
+                "Call again with the submitter's email address copied exactly "
+                "from the expense's 'submitter' field."
+            ),
+        )
+    try:
+        records = await recall_records(tool_context, ref.submitter)
+    except MemoryUnavailableError as exc:
+        return SpendingHistoryResult(
+            status="error",
+            submitter=ref.submitter,
+            error=f"Expense history is unavailable: {exc}",
+            recovery=_MEMORY_DOWN_RECOVERY,
+        )
     approved = [r for r in records if r.get("status") == "approved"]
-    return {
-        "submitter": _clean(submitter).lower(),
-        "claims_recalled": len(records),
-        "approved_total_usd": round(sum(r["amount"] for r in approved), 2),
-        "rejected_count": sum(1 for r in records if r.get("status") == "rejected"),
-        "recent_claims": records[:10],
-    }
+    return SpendingHistoryResult(
+        submitter=ref.submitter,
+        claims_recalled=len(records),
+        approved_total_usd=round(sum(r["amount"] for r in approved), 2),
+        rejected_count=sum(1 for r in records if r.get("status") == "rejected"),
+        recent_claims=[ExpenseRecord(**r) for r in records[:10]],
+        note=_HISTORY_NOTE,
+    )
 
 
 async def check_duplicate_claims(
     submitter: str, amount: float, date: str, tool_context: Context
-) -> dict[str, Any]:
+) -> DuplicateCheckResult:
     """Check whether this submitter already claimed the same amount on the same date.
 
     Args:
-        submitter: The submitter's email address.
-        amount: The claim amount in USD.
-        date: The expense date, YYYY-MM-DD.
+        submitter: The submitter's email address, exactly as in the expense.
+        amount: The claim amount in USD (greater than 0).
+        date: The expense date, formatted YYYY-MM-DD.
 
     Returns:
-        Whether a duplicate was found, and the matching past claims.
+        status "ok" with is_duplicate and the matching past claims. On
+        failure, status "error" with recovery instructions.
     """
-    records = await recall_records(tool_context, submitter)
-    matches = find_duplicates(records, amount, date)
-    return {"is_duplicate": bool(matches), "matching_claims": matches}
+    try:
+        key = ClaimKey(submitter=submitter, amount=amount, date=date)
+    except ValidationError as exc:
+        return DuplicateCheckResult(
+            status="error",
+            error=f"Invalid input: {_invalid_input(exc)}",
+            recovery=(
+                "Call again using the expense's own fields: 'submitter' as an email "
+                "address, 'amount' as a positive number, and 'date' as YYYY-MM-DD. "
+                "If the expense has no valid date, skip this check and say so in "
+                "the review."
+            ),
+        )
+    try:
+        records = await recall_records(tool_context, key.submitter)
+    except MemoryUnavailableError as exc:
+        return DuplicateCheckResult(
+            status="error",
+            error=f"Expense history is unavailable: {exc}",
+            recovery=_MEMORY_DOWN_RECOVERY,
+        )
+    matches = find_duplicates(records, key.amount, key.date)
+    return DuplicateCheckResult(
+        is_duplicate=bool(matches),
+        matching_claims=[ExpenseRecord(**r) for r in matches],
+    )
+
+
+def emit_expense_alert(
+    submitter: str,
+    amount: float,
+    category: str,
+    risk_summary: str,
+) -> AlertResult:
+    """Emit a structured alert telling finance a flagged expense needs review.
+
+    The alert is a WARNING log with ``alert_type="expense_review"``, linked to
+    the current trace. A log-based metric and alert policy
+    (``deployment/terraform/single-project/monitoring.tf``) turn it into a
+    notification.
+
+    Args:
+        submitter: Who submitted the expense (email address).
+        amount: The expense amount in USD.
+        category: The expense category.
+        risk_summary: One sentence on why this expense needs human review.
+
+    Returns:
+        status "ok" with alert_emitted true. On failure, status "error" with
+        recovery instructions.
+    """
+    if not (risk_summary or "").strip():
+        return AlertResult(
+            status="error",
+            error="risk_summary is empty.",
+            recovery="Call again with a one-sentence risk summary.",
+        )
+    try:
+        obs.set_attributes(
+            obs.trace.get_current_span(),
+            alert_type="expense_review",
+            amount_usd=float(amount),
+        )
+        obs.log_event(
+            "expense_review_alert",
+            f"Expense review alert: ${float(amount):.2f} from {submitter} — {risk_summary}",
+            severity="WARNING",
+            alert_type="expense_review",
+            submitter=submitter,
+            amount=float(amount),
+            category=category,
+            risk_summary=risk_summary,
+        )
+    except Exception as exc:
+        logger.exception("Could not emit expense alert.")
+        return AlertResult(
+            status="error",
+            error=f"Alert could not be emitted: {exc}",
+            recovery=(
+                "Do not retry. Finish the review and state that the finance alert "
+                "could not be sent; the workflow still pauses for a human."
+            ),
+        )
+    return AlertResult(alert_emitted=True, submitter=submitter, amount=float(amount))

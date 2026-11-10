@@ -53,6 +53,7 @@ flowchart LR
 |---|---|
 | Workflow graph, nodes, and review agent | [`app/agent.py`](app/agent.py) |
 | Reviewer tools and expense-history memory | [`app/tools.py`](app/tools.py) |
+| Typed tool inputs and results (status, error, recovery) | [`app/schemas.py`](app/schemas.py) |
 | Company expense policy (data, shared by routing and tools) | [`app/expense_policy.py`](app/expense_policy.py) |
 | Threshold and model configuration | [`app/config.py`](app/config.py) |
 | Session, artifact, and memory services shared by every surface | [`app/app_utils/services.py`](app/app_utils/services.py) |
@@ -68,12 +69,18 @@ flowchart LR
   and an LLM agent. Routing is rule-based in code (threshold, per-category policy
   limit, duplicate detection), the LLM is used only for judgment, and a
   human-in-the-loop pause resumes later across separate requests.
-- **Tool & interface design.** Four typed, documented tools for the reviewer:
+- **Tool & interface design.** Four tools for the reviewer:
   `lookup_expense_policy`, `get_spending_history`, `check_duplicate_claims`, and
-  `emit_expense_alert`. Policy is data (`expense_policy.py`) shared by routing
-  and tools. The agent is exposed over the ADK API, the A2A protocol (its agent
-  card is registered in Agent Registry), and a Pub/Sub trigger, with a manager
-  dashboard on top.
+  `emit_expense_alert`. Inputs are validated with Pydantic (email, positive
+  amount, `YYYY-MM-DD` date) and every tool returns a typed result model
+  ([`app/schemas.py`](app/schemas.py)) with a `status`. Failures never raise into
+  the model: they return `status: "error"`, the reason, and a `recovery`
+  instruction (for example "call again with the date as YYYY-MM-DD" or "history
+  is unavailable: continue, raise risk one step, recommend request-more-info"),
+  and the reviewer is instructed to follow it. Policy is data
+  (`expense_policy.py`) shared by routing and tools. The agent is exposed over
+  the ADK API, the A2A protocol (its agent card is registered in Agent
+  Registry), and a Pub/Sub trigger, with a manager dashboard on top.
 - **Context & memory.** Short-term: expense data and the code's review reasons
   are carried in workflow state and injected into the reviewer's instruction.
   Long-term: every decision is written to **Memory Bank** as a structured

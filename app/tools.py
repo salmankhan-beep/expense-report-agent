@@ -17,8 +17,12 @@
 Every decision is written to the memory service (Memory Bank on Agent Runtime,
 in-memory locally) as one structured fact:
 
-    EXPENSE_RECORD | submitter=a@x.com | amount=45.00 | category=meals |
+    EXPENSE_RECORD | submitter=sub_3f9a... | amount=45.00 | category=meals |
     date=2026-04-12 | status=approved | description=Team lunch
+
+The submitter is stored as a keyed pseudonymous ID (``app.pii.pseudonymize``)
+and the description is PII-scrubbed, so Memory Bank holds no email addresses,
+phone numbers, card numbers, or similar.
 
 Memory recall is a similarity search, so the tools parse recalled facts back
 into fields and filter them in code. Duplicate detection is therefore exact,
@@ -37,6 +41,7 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app import observability as obs
+from app import pii
 from app.expense_policy import EXPENSE_POLICY, normalize_category
 from app.schemas import (
     AlertResult,
@@ -66,15 +71,16 @@ def _clean(value: Any, max_len: int = 200) -> str:
 
 
 def format_record(expense: dict[str, Any], status: str) -> str:
-    """Serialize a decided expense as a single memory fact."""
+    """Serialize a decided expense as a single, PII-free memory fact."""
     amount = float(expense.get("amount", 0) or 0)
+    description = pii.scrub_text(str(expense.get("description") or ""))
     return (
-        f"{RECORD_PREFIX} | submitter={_clean(expense.get('submitter')).lower()}"
+        f"{RECORD_PREFIX} | submitter={pii.pseudonymize(str(expense.get('submitter') or ''))}"
         f" | amount={amount:.2f}"
         f" | category={normalize_category(str(expense.get('category', '')))}"
         f" | date={_clean(expense.get('date'), 20)}"
         f" | status={_clean(status, 20)}"
-        f" | description={_clean(expense.get('description'))}"
+        f" | description={_clean(description)}"
     )
 
 
@@ -130,8 +136,8 @@ async def recall_records(ctx: Context, submitter: str) -> list[dict[str, Any]]:
     Raises:
         MemoryUnavailableError: if history can't be read.
     """
-    who = _clean(submitter).lower()
-    with obs.span("memory.recall", submitter_id=obs.submitter_id(who)) as recall_span:
+    who = pii.pseudonymize(submitter)
+    with obs.span("memory.recall", submitter_id=who) as recall_span:
         try:
             response = await ctx.search_memory(f"{RECORD_PREFIX} submitter={who}")
         except ValueError as exc:

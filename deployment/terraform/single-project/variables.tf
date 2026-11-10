@@ -45,6 +45,7 @@ variable "app_sa_roles" {
     "roles/cloudtrace.agent",
     "roles/storage.admin",
     "roles/serviceusage.serviceUsageConsumer",
+    "roles/dlp.user", # PII scrubbing with Cloud DLP (PII_SCRUBBER=dlp)
   ]
 }
 

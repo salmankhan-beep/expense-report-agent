@@ -24,11 +24,11 @@ module adds the business view on top:
 - **Metrics** (OpenTelemetry counters/histograms) for decisions and routing.
   They are no-ops unless a meter provider is configured.
 
-Spans hold a hashed submitter ID, never the email address, so traces carry no
-direct personal data. Logs are the audit trail and keep the email.
+PII never leaves in telemetry: spans and logs carry a keyed pseudonymous
+submitter ID instead of the email, and every log line is scrubbed by
+``app.pii`` (regex, or Cloud DLP when enabled) before it is written.
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -38,6 +38,8 @@ from typing import Any
 
 from opentelemetry import metrics, trace
 from opentelemetry.trace import Span, Status, StatusCode
+
+from app import pii
 
 _INSTRUMENTATION = "expense_agent"
 
@@ -65,9 +67,8 @@ amount_histogram = _meter.create_histogram(
 
 
 def submitter_id(submitter: str) -> str:
-    """Stable, non-reversible ID for a submitter (for spans and metrics)."""
-    normalized = (submitter or "").strip().lower().encode()
-    return hashlib.sha256(normalized).hexdigest()[:12]
+    """Stable, keyed, non-reversible ID for a submitter (spans, logs, memory)."""
+    return pii.pseudonymize(submitter)
 
 
 @contextmanager
@@ -114,12 +115,18 @@ def log_event(event: str, message: str, severity: str = "INFO", **fields: Any) -
     Agent Runtime and Cloud Run turn JSON on stdout into structured Cloud
     Logging entries, so ``event`` and the other fields are filterable and can
     drive log-based metrics and alerts.
+
+    PII is removed before writing: a ``submitter`` field is replaced by its
+    pseudonymous ``submitter_id``, and every string (including ``message``) is
+    scrubbed.
     """
+    if "submitter" in fields:
+        fields["submitter_id"] = submitter_id(str(fields.pop("submitter") or ""))
     entry = {
         "severity": severity,
-        "message": message,
+        "message": pii.scrub_text(message),
         "event": event,
-        **fields,
+        **pii.scrub_value(fields),
         **_trace_fields(),
     }
     print(json.dumps(entry, default=str), file=sys.stdout, flush=True)

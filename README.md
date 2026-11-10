@@ -61,6 +61,9 @@ flowchart LR
 | Workflow graph, nodes, and review agent | [`app/agent.py`](app/agent.py) |
 | Reviewer tools and expense-history memory | [`app/tools.py`](app/tools.py) |
 | Typed tool inputs and results (status, error, recovery) | [`app/schemas.py`](app/schemas.py) |
+| Spans, trace-linked structured logs, metrics | [`app/observability.py`](app/observability.py) |
+| PII scrubbing (regex or Cloud DLP) and keyed pseudonyms | [`app/pii.py`](app/pii.py) |
+| Tool intent vs. outcome audit (ADK tool callbacks) | [`app/tool_audit.py`](app/tool_audit.py) |
 | Company expense policy (data, shared by routing and tools) | [`app/expense_policy.py`](app/expense_policy.py) |
 | Threshold and model configuration | [`app/config.py`](app/config.py) |
 | Session, artifact, and memory services shared by every surface | [`app/app_utils/services.py`](app/app_utils/services.py) |
@@ -111,8 +114,15 @@ flowchart LR
   (`expense.route`, `memory.recall`, `memory.write`, `expense.decision`) whose
   attributes explain each decision: route, reason codes, policy limit, history
   size, duplicate flag. Every log line is structured JSON carrying the trace and
-  span IDs, so Cloud Logging links it to its trace. Spans use a hashed submitter
-  ID, never the email. Log-based metrics and an alert policy are in
+  span IDs, so Cloud Logging links it to its trace. **Every tool call is audited**
+  ([`app/tool_audit.py`](app/tool_audit.py)): a `tool_intent` log records what
+  the LLM asked for (tool and arguments) and a `tool_outcome` log, joined on
+  `call_id`, records what actually happened (status, whether the intent was
+  achieved, latency, error, recovery). **PII is actively scrubbed**
+  ([`app/pii.py`](app/pii.py)) before anything reaches logs, spans, or Memory
+  Bank: submitters become keyed HMAC pseudonyms, and free text is de-identified
+  by regex detectors or, with `PII_SCRUBBER=dlp`, by Cloud DLP. Log-based
+  metrics and an alert policy are in
   [`monitoring.tf`](deployment/terraform/single-project/monitoring.tf). The eval
   suite pairs an LLM judge with a deterministic trajectory metric
   (`review_trajectory`) that fails if a flagged claim skips the review tools or
@@ -226,9 +236,17 @@ invoke_workflow ambient_expense_agent
 | `expense_routed` | Every claim | `route`, `reasons`, `complexity`, `review_model`, `amount` |
 | `expense_review_alert` | Reviewer raises an alert (WARNING) | `alert_type`, `risk_summary` |
 | `expense_decided` | Auto-approval or manager decision | `decision`, `decided_by` |
+| `tool_intent` | Reviewer LLM decides to call a tool | `tool`, `call_id`, `agent`, `review_model`, `args` (scrubbed) |
+| `tool_outcome` | The tool returned or raised | `tool`, `call_id`, `status`, `intent_achieved`, `latency_ms`, `error`, `recovery`, result facts |
 
 Each entry has `logging.googleapis.com/trace` and `spanId`, so "View trace"
-works from Logs Explorer. To find a claim's logs:
+works from Logs Explorer. To compare what the agent intended with what happened,
+join `tool_intent` and `tool_outcome` on `call_id`. A tool that raises is
+recorded with `status: "exception"`, and the model gets a `recovery` instruction
+in place of a crash. The tool's `execute_tool` span carries `tool_status`,
+`tool_intent_achieved`, and `tool_latency_ms`.
+
+To find a claim's logs:
 
 ```bash
 gcloud logging read 'resource.type="aiplatform.googleapis.com/ReasoningEngine" AND jsonPayload.event="expense_routed"' \
@@ -238,9 +256,27 @@ gcloud logging read 'resource.type="aiplatform.googleapis.com/ReasoningEngine" A
 **Metrics and alerting** ([`monitoring.tf`](deployment/terraform/single-project/monitoring.tf)):
 log-based metrics for decisions (by outcome and decider), routing outcomes, and
 review alerts, plus an alert policy that fires on a spike in review alerts and
-emails `alert_notification_email` if set. OpenTelemetry counters
-(`expense.decisions`, `expense.routing`) and an amount histogram are also
-emitted for any configured meter provider.
+emails `alert_notification_email` if set, and a `tool_outcomes` metric by tool,
+status, and agent. OpenTelemetry counters (`expense.decisions`,
+`expense.routing`, `expense.tool_outcomes`) and histograms (amount, tool
+latency) are also emitted for any configured meter provider.
+
+**PII handling** ([`app/pii.py`](app/pii.py)):
+
+| Where | What is stored |
+|---|---|
+| Logs and span attributes | `submitter_id` (HMAC-SHA256 pseudonym, never the email); every message and field passes through the scrubber |
+| Memory Bank records | Pseudonymous submitter and a scrubbed description, so recall and duplicate detection still work without raw PII |
+| Session state | The original claim, which the manager needs to approve it; protected by Agent Runtime session access |
+
+The scrubber runs regex detectors (email, phone, SSN, IBAN, Luhn-checked card
+numbers) by default. Set `PII_SCRUBBER=dlp` to add
+[Cloud DLP](https://cloud.google.com/sensitive-data-protection/docs) de-identification
+(email, phone, card, SSN, IBAN, passport, street address); if DLP fails, it
+falls back to regex. DLP needs `dlp.googleapis.com` and `roles/dlp.user` on the
+runtime service account (both in Terraform). Set `PII_HASH_KEY` from Secret
+Manager in production so pseudonyms can't be reversed by brute force; without it
+a development key is used and a warning is logged.
 
 **Prompt and response logging**: the scaffolded Terraform
 ([`telemetry.tf`](deployment/terraform/single-project/telemetry.tf)) routes GenAI

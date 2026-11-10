@@ -86,9 +86,9 @@ class PolicyLookupResult(ToolResult):
 
 
 class ExpenseRecord(BaseModel):
-    """One remembered, decided claim."""
+    """One remembered, decided claim (PII-free, as stored in memory)."""
 
-    submitter: str
+    submitter: str = Field(description="Pseudonymous submitter ID, not the email.")
     amount: float
     category: str | None = None
     date: str

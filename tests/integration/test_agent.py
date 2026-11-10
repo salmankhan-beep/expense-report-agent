@@ -265,3 +265,69 @@ async def test_subscription_normalization(backend):
     assert resp.status_code == 200
     sessions = resp.json()
     assert len(sessions) >= 1
+
+
+def test_duplicate_claim_recalled_across_sessions() -> None:
+    """A claim approved in one session is remembered, so an identical claim in a
+    later session is routed to review and the reviewer checks for duplicates.
+
+    Runs in its own event loop with a timeout on every step so a stalled model
+    call fails the test instead of hanging it.
+    """
+    import asyncio
+
+    from google.adk.runners import InMemoryRunner
+
+    from app.agent import app as adk_app
+
+    step_timeout_s = 90
+    claim = json.dumps(
+        {
+            "amount": 42.0,
+            "submitter": "dana@company.com",
+            "category": "meals",
+            "description": "Lunch with Initech",
+            "date": "2026-05-02",
+        }
+    )
+
+    async def submit(runner: InMemoryRunner) -> list:
+        session = await runner.session_service.create_session(
+            app_name=adk_app.name, user_id="default-user"
+        )
+        message = types.Content(role="user", parts=[types.Part.from_text(text=claim)])
+        stream = runner.run_async(
+            user_id="default-user", session_id=session.id, new_message=message
+        ).__aiter__()
+        events = []
+        while True:
+            try:
+                events.append(
+                    await asyncio.wait_for(stream.__anext__(), step_timeout_s)
+                )
+            except StopAsyncIteration:
+                return events
+
+    async def scenario() -> tuple[list, list]:
+        runner = InMemoryRunner(app=adk_app)  # includes an in-memory memory service
+        return await submit(runner), await submit(runner)
+
+    def calls(events: list) -> list[str]:
+        return [
+            p.function_call.name
+            for e in events
+            for p in (e.content.parts if e.content else [])
+            if p.function_call
+        ]
+
+    first, second = asyncio.run(scenario())
+
+    assert any(
+        isinstance(e.output, dict) and e.output.get("status") == "approved"
+        for e in first
+    )
+    assert "adk_request_input" not in calls(first)
+
+    second_calls = calls(second)
+    assert "check_duplicate_claims" in second_calls
+    assert "adk_request_input" in second_calls  # paused for a human

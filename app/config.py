@@ -23,12 +23,34 @@ load_dotenv()
 
 DEFAULT_MODEL = "gemini-3.8-flash"
 
+
+def _env_flag(name: str) -> bool | None:
+    """Parse a boolean env var; None when it isn't set."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip().lower() in ("1", "true", "yes")
+
+
+def use_google_cloud() -> bool:
+    """Decide which Gemini backend to use.
+
+    An explicit GOOGLE_GENAI_USE_ENTERPRISE (or the older
+    GOOGLE_GENAI_USE_VERTEXAI) always wins. Otherwise an AI Studio key
+    (GEMINI_API_KEY or GOOGLE_API_KEY) selects AI Studio, and no key selects
+    Google Cloud with Application Default Credentials.
+    """
+    explicit = _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
+    if explicit is None:
+        explicit = _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    if explicit is not None:
+        return explicit
+    return not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+
+
 # --- Authentication ---
-# If GOOGLE_API_KEY is set, use AI Studio.
-# Otherwise, fall back to Vertex AI / Gemini Enterprise Agent Platform with Google Cloud credentials.
-if os.getenv("GOOGLE_API_KEY"):
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
-else:
+# Both flags are set to the same value so the GenAI SDK never sees a conflict.
+if use_google_cloud():
     try:
         import google.auth
 
@@ -37,7 +59,11 @@ else:
     except Exception:
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "")
     os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
+    os.environ["GOOGLE_GENAI_USE_ENTERPRISE"] = "True"
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+else:
+    os.environ["GOOGLE_GENAI_USE_ENTERPRISE"] = "False"
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "False"
 
 
 @dataclass

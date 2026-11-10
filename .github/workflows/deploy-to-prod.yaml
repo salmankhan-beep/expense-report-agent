@@ -20,6 +20,9 @@ on:
 
 jobs:
   deploy:
+    # Skip (instead of failing) until `agents-cli infra cicd` has configured
+    # Workload Identity Federation for this repository.
+    if: ${{ vars.GCP_PROJECT_NUMBER != '' }}
     runs-on: ubuntu-latest
     # This job targets the 'production' environment, which is automatically
     # created by the Terraform setup in `deployment/terraform/cicd/github.tf`.

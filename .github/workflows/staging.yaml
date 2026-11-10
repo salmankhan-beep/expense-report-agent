@@ -26,6 +26,9 @@ on:
 
 jobs:
   deploy_and_test_staging:
+    # Skip (instead of failing) until `agents-cli infra cicd` has configured
+    # Workload Identity Federation for this repository.
+    if: ${{ vars.GCP_PROJECT_NUMBER != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'

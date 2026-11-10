@@ -468,6 +468,7 @@ google-api-core==2.44.0 \
     #   google-cloud-core
     #   google-cloud-dataplex
     #   google-cloud-discoveryengine
+    #   google-cloud-dlp
     #   google-cloud-eventarc-publishing
     #   google-cloud-kms
     #   google-cloud-logging
@@ -499,6 +500,7 @@ google-auth==2.62.1 \
     #   google-cloud-core
     #   google-cloud-dataplex
     #   google-cloud-discoveryengine
+    #   google-cloud-dlp
     #   google-cloud-eventarc-publishing
     #   google-cloud-kms
     #   google-cloud-logging
@@ -567,6 +569,10 @@ google-cloud-discoveryengine==0.13.12 \
     --hash=sha256:295f8c6df3fb26b90fb82c2cd6fbcf4b477661addcb19a94eea16463a5c4e041 \
     --hash=sha256:d6b9f8fadd8ad0d2f4438231c5eb7772a317e9f59cafbcbadc19b5d54c609419
     # via google-adk
+google-cloud-dlp==3.40.0 \
+    --hash=sha256:ba99d17d9b2e95b00d1c30e5dd82e755538353ac46e93ef01db4fb616ad0e0ef \
+    --hash=sha256:f2a42ab5c59a14f487b2c6e2a9d4c090c6a8bd2f58c5fbb0387dcfe9fb2beae7
+    # via ambient-expense-agent
 google-cloud-eventarc-publishing==0.10.1 \
     --hash=sha256:6ac3ddb148da8e93ba06492794af6c9f4c99b357a3a14edbb48ca3e1464dca1e \
     --hash=sha256:dad93d1c203b85ab1eec9a66b5353ae4031e0f80940d25d77680f4eb4c66611d
@@ -738,6 +744,7 @@ grpcio==1.85.1 \
     #   google-cloud-bigquery-storage
     #   google-cloud-bigtable
     #   google-cloud-dataplex
+    #   google-cloud-dlp
     #   google-cloud-eventarc-publishing
     #   google-cloud-kms
     #   google-cloud-logging
@@ -1426,6 +1433,7 @@ proto-plus==1.29.0 \
     #   google-cloud-bigtable
     #   google-cloud-dataplex
     #   google-cloud-discoveryengine
+    #   google-cloud-dlp
     #   google-cloud-eventarc-publishing
     #   google-cloud-kms
     #   google-cloud-logging
@@ -1460,6 +1468,7 @@ protobuf==6.33.6 \
     #   google-cloud-bigtable
     #   google-cloud-dataplex
     #   google-cloud-discoveryengine
+    #   google-cloud-dlp
     #   google-cloud-eventarc-publishing
     #   google-cloud-kms
     #   google-cloud-logging

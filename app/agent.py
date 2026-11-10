@@ -26,6 +26,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from app import observability as obs
+from app import tool_audit
 from app.config import config
 from app.expense_policy import EXPENSE_POLICY, normalize_category
 from app.tools import (
@@ -376,6 +377,10 @@ def _reviewer(name: str, model: str, role: str) -> Agent:
         instruction=role + "\n\n" + REVIEW_INSTRUCTIONS,
         input_schema=ExpenseData,
         tools=REVIEW_TOOLS,
+        # Audit trail: intended tool action vs actual outcome, PII-scrubbed.
+        before_tool_callback=tool_audit.before_tool_callback,
+        after_tool_callback=tool_audit.after_tool_callback,
+        on_tool_error_callback=tool_audit.on_tool_error_callback,
     )
 
 

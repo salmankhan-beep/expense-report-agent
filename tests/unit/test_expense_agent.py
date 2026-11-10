@@ -164,11 +164,13 @@ def test_auto_approve_records_decision_in_memory() -> None:
 
 
 def test_record_round_trip() -> None:
+    from app.pii import pseudonymize
+
     record = parse_record(
         format_record(expense(submitter="Bob@Company.com"), "approved")
     )
     assert record == {
-        "submitter": "bob@company.com",
+        "submitter": pseudonymize("bob@company.com"),  # never the raw email
         "amount": 45.0,
         "category": "meals",
         "date": "2026-04-12",

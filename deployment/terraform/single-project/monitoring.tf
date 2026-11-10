@@ -84,6 +84,45 @@ resource "google_logging_metric" "expense_routing" {
   depends_on = [google_project_service.services]
 }
 
+# Reviewer tool calls by outcome: ok, error (tool returned recovery steps), or
+# exception (unexpected failure). Joins with tool_intent logs on call_id.
+resource "google_logging_metric" "tool_outcomes" {
+  project = var.project_id
+  name    = "${var.project_name}_tool_outcomes"
+  filter  = "${local.agent_log_filter} AND jsonPayload.event=\"tool_outcome\""
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Reviewer tool outcomes"
+
+    labels {
+      key         = "tool"
+      value_type  = "STRING"
+      description = "Tool name"
+    }
+    labels {
+      key         = "status"
+      value_type  = "STRING"
+      description = "ok, error, or exception"
+    }
+    labels {
+      key         = "agent"
+      value_type  = "STRING"
+      description = "review_agent or senior_review_agent"
+    }
+  }
+
+  label_extractors = {
+    "tool"   = "EXTRACT(jsonPayload.tool)"
+    "status" = "EXTRACT(jsonPayload.status)"
+    "agent"  = "EXTRACT(jsonPayload.agent)"
+  }
+
+  depends_on = [google_project_service.services]
+}
+
 # Review alerts raised by the review agent's emit_expense_alert tool.
 resource "google_logging_metric" "expense_review_alerts" {
   project = var.project_id

@@ -35,6 +35,7 @@ from google.adk.events.event import Event
 from google.adk.memory.memory_entry import MemoryEntry
 from google.genai import types
 
+from app import observability as obs
 from app.expense_policy import EXPENSE_POLICY, normalize_category
 
 logger = logging.getLogger(__name__)
@@ -104,22 +105,30 @@ def find_duplicates(
 async def recall_records(ctx: Context, submitter: str) -> list[dict[str, Any]]:
     """Recall this submitter's past expense records from memory."""
     who = _clean(submitter).lower()
-    try:
-        response = await ctx.search_memory(f"{RECORD_PREFIX} submitter={who}")
-    except ValueError:
-        # No memory service configured (e.g. a bare Runner in tests).
-        logger.warning("Memory service unavailable; no expense history recalled.")
-        return []
-    records = []
-    seen: set[str] = set()
-    for memory in response.memories:
-        parts = memory.content.parts if memory.content else []
-        text = " ".join(p.text for p in parts or [] if p.text)
-        record = parse_record(text)
-        if record and record["submitter"] == who and text not in seen:
-            seen.add(text)
-            records.append(record)
-    return records
+    with obs.span("memory.recall", submitter_id=obs.submitter_id(who)) as recall_span:
+        try:
+            response = await ctx.search_memory(f"{RECORD_PREFIX} submitter={who}")
+        except ValueError:
+            # No memory service configured (e.g. a bare Runner in tests).
+            logger.warning("Memory service unavailable; no expense history recalled.")
+            obs.set_attributes(recall_span, memory_available=False, records=0)
+            return []
+        records = []
+        seen: set[str] = set()
+        for memory in response.memories:
+            parts = memory.content.parts if memory.content else []
+            text = " ".join(p.text for p in parts or [] if p.text)
+            record = parse_record(text)
+            if record and record["submitter"] == who and text not in seen:
+                seen.add(text)
+                records.append(record)
+        obs.set_attributes(
+            recall_span,
+            memory_available=True,
+            memories_returned=len(response.memories),
+            records=len(records),
+        )
+        return records
 
 
 async def record_expense_decision(
@@ -128,20 +137,29 @@ async def record_expense_decision(
     """Write a decided expense to memory. Never blocks the decision on failure."""
     fact = format_record(expense, status)
     content = types.Content(role="user", parts=[types.Part.from_text(text=fact)])
-    try:
-        await ctx.add_memory(memories=[MemoryEntry(content=content)])
-    except NotImplementedError:
-        # InMemoryMemoryService has no direct writes; store it as an event.
+    with obs.span("memory.write", status=status) as write_span:
+        method = "add_memory"
         try:
-            await ctx.add_events_to_memory(
-                events=[Event(author="expense_ledger", content=content)]
-            )
+            await ctx.add_memory(memories=[MemoryEntry(content=content)])
+            written = True
+        except NotImplementedError:
+            # InMemoryMemoryService has no direct writes; store it as an event.
+            method = "add_events_to_memory"
+            try:
+                await ctx.add_events_to_memory(
+                    events=[Event(author="expense_ledger", content=content)]
+                )
+                written = True
+            except Exception:
+                logger.exception("Could not record expense decision in memory.")
+                written = False
+        except ValueError:
+            logger.warning("Memory service unavailable; decision not recorded.")
+            method, written = "none", False
         except Exception:
             logger.exception("Could not record expense decision in memory.")
-    except ValueError:
-        logger.warning("Memory service unavailable; decision not recorded.")
-    except Exception:
-        logger.exception("Could not record expense decision in memory.")
+            written = False
+        obs.set_attributes(write_span, method=method, written=written)
 
 
 # ---------------------------------------------------------------------------

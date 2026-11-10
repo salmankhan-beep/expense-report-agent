@@ -82,10 +82,17 @@ flowchart LR
   duplicate detection is exact, while spending history covers the most relevant
   remembered claims rather than a full ledger. Sessions are stored by Agent
   Runtime, so a pause survives restarts.
-- **Observability & tracing.** OpenTelemetry traces go to Cloud Trace on Agent
-  Runtime. Decisions and alerts are structured JSON logs (alert logs are designed to
-  drive a log-based alert). An LLM-as-judge eval suite covers routine approvals,
-  threshold boundaries, policy breaches, and prompt injection.
+- **Observability & tracing.** ADK traces every workflow run, node, LLM call, and
+  tool call; [`app/observability.py`](app/observability.py) adds business spans
+  (`expense.route`, `memory.recall`, `memory.write`, `expense.decision`) whose
+  attributes explain each decision: route, reason codes, policy limit, history
+  size, duplicate flag. Every log line is structured JSON carrying the trace and
+  span IDs, so Cloud Logging links it to its trace. Spans use a hashed submitter
+  ID, never the email. Log-based metrics and an alert policy are in
+  [`monitoring.tf`](deployment/terraform/single-project/monitoring.tf). The eval
+  suite pairs an LLM judge with a deterministic trajectory metric
+  (`review_trajectory`) that fails if a flagged claim skips the review tools or
+  the human pause. See [Observability](#observability).
 - **Infrastructure & CI/CD.** Container deployment to Agent Runtime, Terraform for
   single-project and staging/production setups, and GitHub Actions: lint and unit
   tests on every push, plus PR checks, staging, and a production-deploy pipeline
@@ -168,6 +175,52 @@ agents-cli eval run                     # LLM-as-judge over tests/eval/datasets
 Expense policy (limits and rules per category) lives in
 [`app/expense_policy.py`](app/expense_policy.py); change it there and both the
 routing and the reviewer's `lookup_expense_policy` tool pick it up.
+
+## Observability
+
+What one flagged claim looks like in **Cloud Trace** (Agent Runtime exports
+traces automatically):
+
+```text
+invoke_workflow ambient_expense_agent
+├── expense.route          route=NEEDS_REVIEW  reasons=policy_limit,duplicate
+│   └── memory.recall      records=1  memories_returned=3
+├── invoke_agent review_agent
+│   ├── call_llm / generate_content
+│   ├── execute_tool lookup_expense_policy
+│   ├── execute_tool get_spending_history  →  memory.recall
+│   ├── execute_tool check_duplicate_claims  →  memory.recall
+│   └── execute_tool emit_expense_alert      alert_type=expense_review
+└── request_approval (paused for a human)
+```
+
+**Structured logs** (`event` field) go to the `reasoning_engine_stdout` log:
+
+| `event` | When | Key fields |
+|---|---|---|
+| `expense_routed` | Every claim | `route`, `reasons`, `amount`, `category` |
+| `expense_review_alert` | Reviewer raises an alert (WARNING) | `alert_type`, `risk_summary` |
+| `expense_decided` | Auto-approval or manager decision | `decision`, `decided_by` |
+
+Each entry has `logging.googleapis.com/trace` and `spanId`, so "View trace"
+works from Logs Explorer. To find a claim's logs:
+
+```bash
+gcloud logging read 'resource.type="aiplatform.googleapis.com/ReasoningEngine" AND jsonPayload.event="expense_routed"' \
+  --project=YOUR_PROJECT --limit=10
+```
+
+**Metrics and alerting** ([`monitoring.tf`](deployment/terraform/single-project/monitoring.tf)):
+log-based metrics for decisions (by outcome and decider), routing outcomes, and
+review alerts, plus an alert policy that fires on a spike in review alerts and
+emails `alert_notification_email` if set. OpenTelemetry counters
+(`expense.decisions`, `expense.routing`) and an amount histogram are also
+emitted for any configured meter provider.
+
+**Prompt and response logging**: the scaffolded Terraform
+([`telemetry.tf`](deployment/terraform/single-project/telemetry.tf)) routes GenAI
+telemetry to BigQuery. Message content stays out of traces
+(`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT`).
 
 ## Deploy to Agent Runtime
 

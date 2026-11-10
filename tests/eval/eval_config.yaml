@@ -1,12 +1,69 @@
 metrics_to_run:
   - custom_response_quality
+  - review_trajectory
 
 thresholds:
-  custom_response_quality: 4
+  custom_response_quality: 4  # LLM judge, 1-5
+  review_trajectory: 1        # deterministic, every case must pass
 
 custom_metrics:
+  # Local LLM-as-judge (see response_quality.py). Runs in-process via
+  # google-genai on Gemini platform (ADC) or Google AI Studio (GEMINI_API_KEY).
   - name: custom_response_quality
     custom_function_file: response_quality.py
+
+  # Deterministic trajectory check, independent of the agent's own routing code:
+  # it derives the expected route from the claim (threshold and a copy of the
+  # per-category limits in app/expense_policy.py). Flagged claims must be
+  # investigated with the policy and duplicate tools and then pause for a human;
+  # routine claims must do neither. (The grader drops content-less events, so
+  # the agent's state deltas aren't visible here.)
+  - name: review_trajectory
+    custom_function: |
+      import json
+
+      LIMITS = {"meals": 75, "travel": 1500, "lodging": 300, "software": 500,
+                "equipment": 1000, "supplies": 150, "other": 100}
+      ALIASES = {"meal": "meals", "lunch": "meals", "dinner": "meals",
+                 "breakfast": "meals", "food": "meals", "flight": "travel",
+                 "airfare": "travel", "train": "travel", "taxi": "travel",
+                 "hotel": "lodging", "license": "software",
+                 "subscription": "software", "hardware": "equipment"}
+
+      def _prompt_text(prompt):
+          if isinstance(prompt, str):
+              return prompt
+          parts = (prompt or {}).get("parts") or []
+          return " ".join(p.get("text", "") for p in parts if isinstance(p, dict))
+
+      def evaluate(instance):
+          try:
+              claim = json.loads(_prompt_text(instance.get("prompt")))
+          except (ValueError, TypeError):
+              return {"score": 0, "explanation": "Prompt is not a JSON claim."}
+          amount = float(claim.get("amount", 0))
+          category = str(claim.get("category", "")).strip().lower()
+          category = ALIASES.get(category, category)
+          limit = LIMITS.get(category, LIMITS["other"])
+          flagged = amount >= 100 or amount > limit
+
+          calls = [
+              part["function_call"].get("name")
+              for turn in (instance.get("agent_data") or {}).get("turns", [])
+              for e in turn.get("events", [])
+              for part in (e.get("content") or {}).get("parts") or []
+              if isinstance(part, dict) and part.get("function_call")
+          ]
+          if flagged:
+              required = {"lookup_expense_policy", "check_duplicate_claims", "adk_request_input"}
+              missing = sorted(required - set(calls))
+              if missing:
+                  return {"score": 0, "explanation": f"${amount:.2f} {category} should be reviewed; missing {missing}"}
+              return {"score": 1, "explanation": f"${amount:.2f} {category} reviewed with tools, then paused."}
+          if calls:
+              return {"score": 0, "explanation": f"${amount:.2f} {category} is routine but called {calls}"}
+          return {"score": 1, "explanation": f"${amount:.2f} {category} auto-approved with no tools or pause."}
+
   - name: agent_turn_count
     custom_function: |
       def evaluate(instance):
